@@ -42,6 +42,13 @@ pub struct MediaAssetRecord {
     /// Present on writes and `media_asset_with_payload`; metadata reads omit it.
     pub payload: Option<Vec<u8>>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPruneReport {
+    pub sources: usize,
+    pub assets: usize,
+    pub jobs: usize,
+}
 pub struct CompletedUploadRetry<'a> {
     pub expected: &'a MediaJobRecord,
     pub source: &'a OwnedMediaSource,
@@ -219,6 +226,42 @@ impl Store {
     }
     pub fn media_source(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
         self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,payload,created_at FROM media_sources WHERE id=?1",[id],|r|Ok((OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(5)?},r.get(4)?)))?)})
+    }
+    /// Drop media rows that nothing will read again: finished jobs, cached
+    /// assets and uploaded sources older than the retention window. Callers own
+    /// the policy; this only enforces the window and reports what it removed.
+    pub fn prune_media(
+        &self,
+        account: &str,
+        older_than_hours: u32,
+        vacuum: bool,
+    ) -> Result<MediaPruneReport> {
+        if !(1..=24 * 365).contains(&older_than_hours) {
+            bail!("invalid media_retention_hours");
+        }
+        let window = format!("-{older_than_hours} hours");
+        self.control(account, |db| {
+            let jobs = db.execute(
+                "DELETE FROM media_jobs WHERE state IN ('done','failed','cancelled') AND julianday(updated_at) < julianday('now',?1)",
+                params![window],
+            )?;
+            let assets = db.execute(
+                "DELETE FROM media_assets WHERE julianday(updated_at) < julianday('now',?1)",
+                params![window],
+            )?;
+            let sources = db.execute(
+                "DELETE FROM media_sources WHERE julianday(created_at) < julianday('now',?1)",
+                params![window],
+            )?;
+            if vacuum {
+                db.execute("VACUUM", [])?;
+            }
+            Ok(MediaPruneReport {
+                sources,
+                assets,
+                jobs,
+            })
+        })
     }
     pub fn media_source_metadata(&self, account: &str, id: &str) -> Result<OwnedMediaSource> {
         self.control(account,|db|{Ok(db.query_row("SELECT name,media_type,byte_length,sha256,created_at FROM media_sources WHERE id=?1",[id],|r|Ok(OwnedMediaSource{id:id.into(),name:r.get(0)?,media_type:r.get(1)?,byte_length:r.get(2)?,sha256:r.get(3)?,created_at:r.get(4)?}))?)})
@@ -508,6 +551,46 @@ mod tests {
         s.create_account("test").unwrap();
         (t, s)
     }
+    #[test]
+    fn prune_media_drops_only_rows_outside_the_retention_window() {
+        let (_dir, s) = setup();
+        for name in ["old", "fresh"] {
+            s.create_media_source(
+                "test",
+                name,
+                "file.bin",
+                "application/octet-stream",
+                16,
+                &"a".repeat(64),
+                b"sealed source",
+            )
+            .unwrap();
+        }
+        // 模拟一条老数据：真实场景里 created_at 由写入时刻决定
+        s.control("test", |db| {
+            Ok(db.execute(
+                "UPDATE media_sources SET created_at = datetime('now','-10 days') WHERE id='old'",
+                [],
+            )?)
+        })
+        .unwrap();
+
+        let report = s.prune_media("test", 24 * 7, false).unwrap();
+
+        assert_eq!(report.sources, 1);
+        assert!(s.media_source_metadata("test", "old").is_err());
+        assert!(s.media_source_metadata("test", "fresh").is_ok());
+        assert_eq!(s.prune_media("test", 24 * 7, false).unwrap().sources, 0);
+    }
+
+    #[test]
+    fn prune_media_rejects_windows_outside_one_hour_to_one_year() {
+        let (_dir, s) = setup();
+        for hours in [0u32, 24 * 366] {
+            assert!(s.prune_media("test", hours, false).is_err(), "{hours}");
+        }
+    }
+
     #[test]
     fn completed_upload_retry_cas_rejects_job_source_and_authorization_races() {
         for change in [

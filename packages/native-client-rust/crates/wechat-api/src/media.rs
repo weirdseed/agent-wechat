@@ -44,6 +44,7 @@ pub(super) fn routes() -> Router<App> {
             "/v1/accounts/{a}/media-writeback/repair",
             post(repair_writeback),
         )
+        .route("/v1/accounts/{a}/media/prune", post(prune_media))
 }
 async fn repair_writeback(
     State(app): State<App>,
@@ -64,6 +65,32 @@ async fn repair_writeback(
         Json(serde_json::to_value(operation).map_err(anyhow::Error::from)?),
     ))
 }
+async fn prune_media(
+    State(app): State<App>,
+    Extension(c): Extension<Claims>,
+    Path(a): Path<String>,
+    Json(input): Json<contracts::NativeMediaPruneRequest>,
+) -> ApiResult<Json<Value>> {
+    c.require(Some(&a), "media")?;
+    if !(1..=24 * 365).contains(&input.hours) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid_media_retention_hours",
+        ));
+    }
+    let hours = input.hours;
+    let vacuum = input.vacuum;
+    let guard = app.core.lock_account(&a).await?;
+    let report = work(move || {
+        let _guard = guard;
+        app.core.prune_media(&a, hours, vacuum)
+    })
+    .await?;
+    Ok(Json(
+        serde_json::to_value(report).map_err(anyhow::Error::from)?,
+    ))
+}
+
 async fn upload(
     State(app): State<App>,
     Extension(c): Extension<Claims>,

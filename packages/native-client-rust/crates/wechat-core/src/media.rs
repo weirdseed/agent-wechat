@@ -19,7 +19,7 @@ use wechat_protocol::{
     },
     NativeOptions,
 };
-use wechat_store::{MediaAssetRecord, MediaJobRecord, OwnedMediaSource};
+use wechat_store::{MediaAssetRecord, MediaJobRecord, MediaPruneReport, OwnedMediaSource};
 #[path = "media_auto.rs"]
 mod automatic;
 #[path = "media_identity.rs"]
@@ -358,6 +358,12 @@ impl Core {
             &digest(bytes),
             &sealed,
         )
+    }
+    /// Prune cached media older than `older_than_hours`; the plugin/operator owns
+    /// the retention policy, the daemon only applies it while it owns the DB.
+    pub fn prune_media(&self, account: &str, older_than_hours: u32, vacuum: bool) -> Result<MediaPruneReport> {
+        self.store.account(account)?;
+        self.store.prune_media(account, older_than_hours, vacuum)
     }
     fn source_bytes(&self, account: &str, id: &str) -> Result<(OwnedMediaSource, Vec<u8>)> {
         let (meta, sealed) = self.store.media_source(account, id)?;

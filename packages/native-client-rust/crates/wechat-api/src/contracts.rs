@@ -388,6 +388,15 @@ pub struct NativeForgetRequest {
 }
 #[derive(Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeMediaPruneRequest {
+    #[ts(type = "number")]
+    pub hours: u32,
+    #[serde(default)]
+    pub vacuum: bool,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeMediaWritebackRequest {
     #[ts(type = "number")]
     pub limit: usize,
@@ -470,6 +479,8 @@ pub fn typescript() -> String {
         NativeReadRequest::decl(),
         NativeForgetRequest::decl(),
         NativeMediaWritebackRequest::decl(),
+        NativeMediaPruneRequest::decl(),
+        wechat_store::MediaPruneReport::decl(),
         NativeMediaJobRetryRequest::decl(),
         wechat_core::OfficialProfileRequest::decl(),
         wechat_core::OfficialProfileSelection::decl(),
